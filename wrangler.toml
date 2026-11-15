@@ -1,3 +1,7 @@
 name = "andarzgo-worker"
 main = "worker.js"
 compatibility_date = "2024-11-14"
+
+[[kv_namespaces]]
+binding = "ORDERS_DB"
+id = "0d6392a74ae94aebbadb7428eeef175f"
