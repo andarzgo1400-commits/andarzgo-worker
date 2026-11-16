@@ -1,116 +1,120 @@
+const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json", ...headers } });
+
+function genToken() {
+  const arr = new Uint8Array(24);
+  crypto.getRandomValues(arr);
+  return Array.from(arr, b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function notify(env, text) {
+  if (env.TELEGRAM_BOT_TOKEN) fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text }) });
+  if (env.BALE_BOT_TOKEN) fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/sendMessage`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: env.BALE_CHAT_ID, text }) });
+}
+
+async function checkAuth(request, env) {
+  const auth = request.headers.get("Authorization") || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!token) return false;
+  const session = await env.ORDERS_DB.get("session_" + token);
+  return !!session;
+}
+
+const RESOURCES = {
+  orders: "order",
+  invoices: "invoice",
+  contacts: "contact",
+  hamyars: "hamyar",
+  magazine: "magazine",
+  ads: "ad"
+};
+const PUBLIC_READ = ["magazine", "ads"]; // خواندن این دو بدون رمز عبور (برای پنل مشتری)
+
 export default {
-  async fetch(request, env) {
-    const corsHeaders = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    };
-
-    if (request.method === "OPTIONS") {
-      return new Response(null, { headers: corsHeaders });
-    }
-
-    const url = new URL(request.url);
-    const path = url.pathname;
+  async fetch(r, e) {
+    const h = { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS", "Access-Control-Allow-Headers": "Content-Type, Authorization" };
+    if (r.method === "OPTIONS") return new Response(null, { headers: h });
+    const u = new URL(r.url), parts = u.pathname.split("/").filter(Boolean);
 
     try {
-      // ============================================================
-      // 1. تست اتصال
-      // ============================================================
-      if (path === "/api/test") {
-        let msg = "✅ تست موفقیت‌آمیز! اتصال ربات‌ها برقرار است.";
-        if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
-          await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text: msg })
-          });
-        }
-        if (env.BALE_BOT_TOKEN && env.BALE_CHAT_ID) {
-          await fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/sendMessage`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: env.BALE_CHAT_ID, text: msg })
-          });
-        }
-        return new Response("تست ارسال شد به ربات‌ها.", { headers: corsHeaders });
+      if (parts[0] === "api" && parts[1] === "test") {
+        await notify(e, "✅ تست موفقیت‌آمیز!");
+        return json({ ok: true }, 200, h);
       }
 
-      // ============================================================
-      // 2. پاسخ به پیام‌های ربات‌ها (Webhook)
-      // ============================================================
-      if (request.method === "POST" && (path.includes("telegram") || path.includes("bale"))) {
-        const update = await request.json();
-        const isBale = path.includes("bale");
+      if (r.method === "POST" && (u.pathname.includes("bale") || u.pathname.includes("telegram"))) {
+        const a = await r.json(), c = a.message?.chat?.id, t = a.message?.text?.toLowerCase(), isB = u.pathname.includes("bale");
+        const rep = (t === "/start" || t === "سلام") ? "سلام! به ربات تاسیسات اندرزگو خوش آمدید. 👋\n\nبرای ثبت درخواست، از سایت استفاده کنید." : "پیام دریافت شد.";
+        const tok = isB ? e.BALE_BOT_TOKEN : e.TELEGRAM_BOT_TOKEN;
+        const api = isB ? `https://tapi.bale.ai/bot${tok}/sendMessage` : `https://api.telegram.org/bot${tok}/sendMessage`;
+        if (c && tok) await fetch(api, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ chat_id: c, text: rep }) });
+        return new Response("ok", { headers: h });
+      }
 
-        if (update.message && update.message.text) {
-          const chatId = update.message.chat.id;
-          const text = update.message.text.toLowerCase();
-          
-          let reply = "سلام! به ربات تاسیسات اندرزگو خوش آمدید. 👋\n\nبرای ثبت درخواست، لطفاً از طریق وب‌سایت اقدام کنید.";
-          if (text !== "/start" && text !== "سلام") {
-             reply = "پیام شما دریافت شد. برای ثبت درخواست به سایت ما مراجعه کنید.";
+      if (r.method === "POST" && parts[0] === "api" && parts[1] === "order") {
+        const d = await r.json();
+        d.id = Date.now().toString();
+        await e.ORDERS_DB.put("order_" + d.id, JSON.stringify(d));
+        await notify(e, `🔔 درخواست جدید!\n👤 نام: ${d.name || d.custName || '---'}\n📞 شماره: ${d.phone || d.custPhone || '---'}`);
+        return json({ ok: true, id: d.id }, 200, h);
+      }
+
+      if (r.method === "POST" && parts[0] === "api" && parts[1] === "login") {
+        const body = await r.json();
+        if (body.password !== e.ADMIN_PASSWORD) return json({ ok: false, error: "رمز عبور اشتباه است" }, 401, h);
+        const token = genToken();
+        await e.ORDERS_DB.put("session_" + token, "1", { expirationTtl: 60 * 60 * 24 * 7 });
+        return json({ ok: true, token }, 200, h);
+      }
+
+      if (r.method === "GET" && parts[0] === "api" && parts[1] === "check-auth") {
+        const valid = await checkAuth(r, e);
+        return json({ ok: valid }, valid ? 200 : 401, h);
+      }
+
+      if (parts[0] === "api" && RESOURCES[parts[1]]) {
+        const resource = parts[1], prefix = RESOURCES[resource], id = parts[2];
+        const isPublicRead = PUBLIC_READ.includes(resource) && r.method === "GET";
+
+        if (!isPublicRead) {
+          const authed = await checkAuth(r, e);
+          if (!authed) return json({ ok: false, error: "دسترسی غیرمجاز - لطفاً دوباره وارد شوید" }, 401, h);
+        }
+
+        if (r.method === "GET" && !id) {
+          const list = await e.ORDERS_DB.list({ prefix: prefix + "_" });
+          const items = [];
+          for (const k of list.keys) {
+            const v = await e.ORDERS_DB.get(k.name);
+            if (v) try { items.push(JSON.parse(v)); } catch (x) {}
           }
-          
-          const token = isBale ? env.BALE_BOT_TOKEN : env.TELEGRAM_BOT_TOKEN;
-          const apiUrl = isBale ? `https://tapi.bale.ai/bot${token}/sendMessage` : `https://api.telegram.org/bot${token}/sendMessage`;
-          
-          if(token) {
-             await fetch(apiUrl, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ chat_id: chatId, text: reply })
-             });
-          }
+          return json(items, 200, h);
         }
-        return new Response("OK", { status: 200 });
+
+        if (r.method === "POST" && !id) {
+          const d = await r.json();
+          d.id = Date.now().toString();
+          await e.ORDERS_DB.put(prefix + "_" + d.id, JSON.stringify(d));
+          return json({ ok: true, id: d.id }, 200, h);
+        }
+
+        if (r.method === "PUT" && id) {
+          const existing = await e.ORDERS_DB.get(prefix + "_" + id);
+          if (!existing) return json({ ok: false, error: "یافت نشد" }, 404, h);
+          const updates = await r.json();
+          const merged = { ...JSON.parse(existing), ...updates, id };
+          await e.ORDERS_DB.put(prefix + "_" + id, JSON.stringify(merged));
+          return json({ ok: true }, 200, h);
+        }
+
+        if (r.method === "DELETE" && id) {
+          await e.ORDERS_DB.delete(prefix + "_" + id);
+          return json({ ok: true }, 200, h);
+        }
       }
 
-      // ============================================================
-      // 3. ثبت سفارش جدید (از سمت سایت)
-      // ============================================================
-      if (request.method === "POST" && path === "/api/order") {
-        const data = await request.json();
-        data.id = Date.now().toString();
-        
-        // ذخیره در دیتابیس کلادفلر
-        await env.ORDERS_DB.put(data.id, JSON.stringify(data));
-        
-        // ارسال پیام به تلگرام و بله
-        const msg = `🔔 درخواست جدید!\n👤 نام: ${data.name || data.custName || '---'}\n📞 شماره: ${data.phone || data.custPhone || '---'}`;
-        
-        if (env.TELEGRAM_BOT_TOKEN && env.TELEGRAM_CHAT_ID) {
-          await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: env.TELEGRAM_CHAT_ID, text: msg })
-          });
-        }
-        if (env.BALE_BOT_TOKEN && env.BALE_CHAT_ID) {
-          await fetch(`https://tapi.bale.ai/bot${env.BALE_BOT_TOKEN}/sendMessage`, {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ chat_id: env.BALE_CHAT_ID, text: msg })
-          });
-        }
-        
-        return new Response(JSON.stringify({ ok: true }), { headers: corsHeaders });
-      }
-
-      // ============================================================
-      // 4. دریافت لیست سفارش‌ها (برای پنل ادمین)
-      // ============================================================
-      if (request.method === "GET" && path === "/api/orders") {
-        const list = await env.ORDERS_DB.list();
-        const orders = [];
-        for (const key of list.keys) {
-          const val = await env.ORDERS_DB.get(key.name);
-          if (val) {
-             try { orders.push(JSON.parse(val)); } catch(e) {}
-          }
-        }
-        return new Response(JSON.stringify(orders), { headers: corsHeaders });
-      }
-
-      return new Response("Not Found", { status: 404, headers: corsHeaders });
-
-    } catch (error) {
-      return new Response(JSON.stringify({ error: error.message }), { status: 500, headers: corsHeaders });
+      return json({ ok: false, error: "Not Found" }, 404, h);
+    } catch (x) {
+      return json({ ok: false, error: x.message }, 500, h);
     }
   }
 };
